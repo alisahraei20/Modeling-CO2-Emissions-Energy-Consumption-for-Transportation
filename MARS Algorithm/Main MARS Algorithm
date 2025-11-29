@@ -1,0 +1,450 @@
+############################################################
+# MARS Degree = 1 (NO Year as input)
+# 6 Models + Nonlinear Input Forecasts + Strict Output Forecast
+# + SHAP Analysis for Best Model (SHAP only on used variables)
+############################################################
+
+# install.packages(c("readxl", "dplyr", "ggplot2", "earth", "writexl", "fastshap"))
+
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(earth)
+library(writexl)
+library(fastshap)
+
+############################################################
+# 1. Load Data
+############################################################
+
+data_dir  <- "E:/******Directory******"
+file_name <- "USA_MARS_Final_For_MARS_Modeling.xlsx"
+full_path <- file.path(data_dir, file_name)
+
+df_raw <- read_excel(
+  full_path,
+  sheet     = 1,
+  skip      = 1,    # skip long header, use row 2 (short names)
+  col_names = TRUE
+)
+
+# Col 1 = Year, Col 2 = Output, Col 3–11 = inputs
+df <- df_raw %>%
+  rename(
+    Year   = 1,
+    Output = 2
+  ) %>%
+  mutate(
+    Year   = as.numeric(Year),
+    Output = as.numeric(Output),
+    across(3:ncol(.), ~ suppressWarnings(as.numeric(.)))
+  ) %>%
+  filter(complete.cases(.))
+
+cat("Original data years:", min(df$Year), "to", max(df$Year), "\n")
+
+############################################################
+# 2. Remove COVID Years (2020–2022)
+############################################################
+
+df <- df %>%
+  filter(!(Year %in% c(2020, 2021, 2022)))
+
+cat("After removing 2020–2022, data years:", min(df$Year), "to", max(df$Year), "\n")
+cat("Remaining years:\n")
+print(df$Year)
+
+############################################################
+# 3. Train / Test Split (Year only as index)
+############################################################
+
+train_df <- df %>% filter(Year <= 2015)
+test_df  <- df %>% filter(Year >  2015)
+
+cat("Training data: ", min(train_df$Year), "-", max(train_df$Year), "\n")
+cat("Testing  data: ", min(test_df$Year),  "-", max(test_df$Year), "\n")
+
+last_obs_output <- tail(df$Output, 1)
+
+############################################################
+# 4. Metrics Function
+############################################################
+
+metrics <- function(actual, pred) {
+  R2   <- 1 - sum((actual - pred)^2) / sum((actual - mean(actual))^2)
+  RMSE <- sqrt(mean((actual - pred)^2))
+  MAE  <- mean(abs(actual - pred))
+  MAPE <- mean(abs((actual - pred) / actual)) * 100
+  TheilU <- sqrt(mean((pred - actual)^2)) /
+    (sqrt(mean(actual^2)) + sqrt(mean(pred^2)))
+  data.frame(
+    R2     = R2,
+    RMSE   = RMSE,
+    MAE    = MAE,
+    MAPE   = MAPE,
+    TheilU = TheilU
+  )
+}
+
+############################################################
+# 5. Nonlinear Future Input Extrapolation (2026–2040)
+############################################################
+
+build_future_inputs <- function(df, predictor_names,
+                                start_year = 2026,
+                                end_year   = 2040,
+                                last_N     = 10) {
+  future_years <- seq(start_year, end_year)
+  future_df    <- data.frame(Year = future_years)
+  
+  for (var in predictor_names) {
+    sub_df <- tail(df[, c("Year", var)], last_N)
+    names(sub_df) <- c("Year", "Var")
+    
+    quad_fit <- try(
+      lm(Var ~ poly(Year, 2, raw = TRUE), data = sub_df),
+      silent = TRUE
+    )
+    
+    if (inherits(quad_fit, "try-error")) {
+      base_val  <- tail(sub_df$Var, 1)
+      pred_vals <- rep(base_val, length(future_years))
+    } else {
+      pred_vals <- predict(quad_fit, newdata = data.frame(Year = future_years))
+      last_val  <- tail(sub_df$Var, 1)
+      # enforce non-decreasing for inputs
+      pred_vals <- pmax(pred_vals, last_val)
+      pred_vals <- cummax(pred_vals)
+    }
+    
+    future_df[[var]] <- pred_vals
+  }
+  
+  future_df
+}
+
+############################################################
+# 6. Strictly Increasing Output Forecast Helper
+############################################################
+
+make_strict_increasing <- function(x, min_start = NULL) {
+  if (!is.null(min_start)) {
+    x[1] <- max(x[1], min_start)
+  }
+  for (i in 2:length(x)) {
+    if (x[i] <= x[i - 1]) {
+      x[i] <- x[i - 1] * 1.0001  # tiny positive growth
+    }
+  }
+  return(x)
+}
+
+############################################################
+# 7. Build Future Input Scenarios (All Predictors, NO Year)
+############################################################
+
+all_predictors <- colnames(df)[3:ncol(df)]
+print(all_predictors)
+
+future_inputs_all <- build_future_inputs(
+  df              = df,
+  predictor_names = all_predictors,
+  start_year      = 2026,
+  end_year        = 2040,
+  last_N          = 10
+)
+
+############################################################
+# 8. Define 6 Theoretically-Justified Models (NO Year)
+############################################################
+
+# M1: Full model – benchmark (all 9 inputs)
+formula_M1 <- Output ~ GDP + UR + TPI + ADPI + AVMT + RM + AAT + COPP + APC
+
+# M2: Core macro + activity + labour
+formula_M2 <- Output ~ GDP + AVMT + UR
+
+# M3: Macro + activity + infrastructure
+formula_M3 <- Output ~ GDP + AVMT + RM
+
+# M4: Macro + price & intensity
+formula_M4 <- Output ~ GDP + COPP + TPI
+
+# M5: Transport sector focus
+formula_M5 <- Output ~ ADPI + AVMT + RM
+
+# M6: Activity + climate + intensity
+formula_M6 <- Output ~ AVMT + AAT + TPI
+
+model_formulas <- list(
+  "M1_Full"          = formula_M1,
+  "M2_GDP_AVMT_UR"   = formula_M2,
+  "M3_GDP_AVMT_RM"   = formula_M3,
+  "M4_GDP_COPP_TPI"  = formula_M4,
+  "M5_ADPI_AVMT_RM"  = formula_M5,
+  "M6_AVMT_AAT_TPI"  = formula_M6
+)
+
+############################################################
+# 9. Fit All Models with CV Pruning (degree = 1)
+############################################################
+
+results_list <- list()
+
+for (model_name in names(model_formulas)) {
+  
+  cat("\n==============================\n")
+  cat("FITTING MODEL:", model_name, "\n")
+  cat("==============================\n")
+  
+  formula_k <- model_formulas[[model_name]]
+  
+  # Fit MARS with cross-validated pruning to improve generalization
+  mars_model <- earth(
+    formula = formula_k,
+    data    = train_df,
+    degree  = 1,        # additive hinge functions
+    nk      = 20,
+    pmethod = "cv",
+    nfold   = 5,
+    ncross  = 3
+  )
+  
+  cat("\nMARS summary for", model_name, ":\n")
+  print(summary(mars_model))
+  
+  # Important predictors actually used
+  ev_k      <- evimp(mars_model)
+  used_vars <- rownames(ev_k)
+  vars_k    <- setdiff(all.vars(formula_k), "Output")
+  all_used  <- all(vars_k %in% used_vars)
+  
+  cat("\nPredictors in formula:", paste(vars_k, collapse = ", "), "\n")
+  cat("Variables used in model terms (from evimp):", paste(used_vars, collapse = ", "), "\n")
+  cat("All formula predictors used? ", all_used, "\n")
+  
+  # Local copies for predictions
+  train_loc <- train_df
+  test_loc  <- test_df
+  
+  train_loc$Fitted   <- predict(mars_model, newdata = train_loc)
+  test_loc$Predicted <- predict(mars_model, newdata = test_loc)
+  
+  train_metrics <- metrics(train_loc$Output, train_loc$Fitted)
+  test_metrics  <- metrics(test_loc$Output,  test_loc$Predicted)
+  
+  cat("\n===== TRAINING METRICS -", model_name, "=====\n")
+  print(train_metrics)
+  
+  cat("\n===== TESTING METRICS -", model_name, "=====\n")
+  print(test_metrics)
+  
+  # Forecast 2026–2040: use nonlinear future inputs for this model's variables
+  future_loc <- data.frame(Year = future_inputs_all$Year)
+  for (v in vars_k) {
+    future_loc[[v]] <- future_inputs_all[[v]]
+  }
+  
+  future_loc$Raw_Output_Forecast <- predict(mars_model, newdata = future_loc)
+  future_loc$Output_Forecast <- make_strict_increasing(
+    future_loc$Raw_Output_Forecast,
+    min_start = last_obs_output
+  )
+  
+  cat("\nRaw vs Strictly Increasing Output Forecasts (2026–2040) -", model_name, ":\n")
+  print(future_loc[, c("Year", "Raw_Output_Forecast", "Output_Forecast")])
+  
+  results_list[[model_name]] <- list(
+    name          = model_name,
+    formula       = formula_k,
+    vars_formula  = vars_k,
+    used_vars     = used_vars,
+    all_used      = all_used,
+    evimp         = ev_k,
+    model         = mars_model,
+    train_df      = train_loc,
+    test_df       = test_loc,
+    future_df     = future_loc,
+    train_metrics = train_metrics,
+    test_metrics  = test_metrics
+  )
+}
+
+############################################################
+# 10. Summary Metrics Table (Train + Test for All 6 Models)
+############################################################
+
+summary_rows <- lapply(results_list, function(res) {
+  data.frame(
+    Model          = res$name,
+    Formula        = deparse(res$formula),
+    All_Vars_Used  = res$all_used,
+    Train_R2       = res$train_metrics$R2,
+    Train_RMSE     = res$train_metrics$RMSE,
+    Train_MAE      = res$train_metrics$MAE,
+    Train_MAPE     = res$train_metrics$MAPE,
+    Train_TheilU   = res$train_metrics$TheilU,
+    Test_R2        = res$test_metrics$R2,
+    Test_RMSE      = res$test_metrics$RMSE,
+    Test_MAE       = res$test_metrics$MAE,
+    Test_MAPE      = res$test_metrics$MAPE,
+    Test_TheilU    = res$test_metrics$TheilU   # <- fixed
+  )
+})
+
+Summary_Metrics <- bind_rows(summary_rows)
+print(Summary_Metrics)
+
+############################################################
+# 11. Select Best Model by Test_RMSE (no All_Vars_Used restriction)
+############################################################
+
+best_idx        <- which.min(Summary_Metrics$Test_RMSE)
+best_model_name <- Summary_Metrics$Model[best_idx]
+
+cat("\nBest model (by Test_RMSE):", best_model_name, "\n")
+
+sel_res <- results_list[[best_model_name]]
+
+############################################################
+# 12. Plot for Best Model
+############################################################
+
+plot_long_sel <- bind_rows(
+  df %>%
+    transmute(Year, Value = Output, Type = "Actual"),
+  sel_res$train_df %>%
+    transmute(Year, Value = Fitted, Type = "Train-Fitted"),
+  sel_res$test_df %>%
+    transmute(Year, Value = Predicted, Type = "Test-Predicted"),
+  sel_res$future_df %>%
+    transmute(Year, Value = Output_Forecast, Type = "Forecast")
+)
+
+p_sel <- ggplot(plot_long_sel,
+                aes(x = Year, y = Value, color = Type, linetype = Type)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(data = subset(plot_long_sel, Type == "Actual"), size = 2) +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = paste("Degree-1 MARS (No Year):", best_model_name,
+                  "- Actual, Fitted, Test, Strictly Increasing Forecast (1990–2040)"),
+    x = "Year",
+    y = "Transport Energy Consumption",
+    color = "Series",
+    linetype = "Series"
+  )
+
+print(p_sel)
+
+############################################################
+# 13. SHAP Analysis for Best Model
+#     Use ONLY variables that MARS actually uses (evimp rows)
+############################################################
+
+mod_best   <- sel_res$model
+train_best <- sel_res$train_df
+
+# variables actually used in MARS basis functions
+vars_best <- sel_res$used_vars
+cat("\nPredictors used in BEST model (for SHAP):\n")
+print(vars_best)
+
+X_best <- train_best %>%
+  select(all_of(vars_best))
+
+X_best_mat <- as.matrix(X_best)
+
+pred_wrapper <- function(object, newdata) {
+  newdata_df <- as.data.frame(newdata)
+  colnames(newdata_df) <- colnames(X_best)
+  predict(object, newdata = newdata_df)
+}
+
+set.seed(123)
+
+shap_best <- fastshap::explain(
+  object       = mod_best,
+  X            = X_best_mat,
+  pred_wrapper = pred_wrapper,
+  nsim         = 500
+)
+
+shap_importance_best <- data.frame(
+  Variable    = colnames(shap_best),
+  MeanAbsSHAP = apply(abs(shap_best), 2, mean)
+)
+
+total_shap_best <- sum(shap_importance_best$MeanAbsSHAP)
+if (total_shap_best > 0) {
+  shap_importance_best <- shap_importance_best %>%
+    mutate(Perc_Contribution = 100 * MeanAbsSHAP / total_shap_best)
+} else {
+  shap_importance_best$Perc_Contribution <- 0
+}
+
+shap_importance_best <- shap_importance_best %>%
+  arrange(desc(MeanAbsSHAP))
+
+cat("\nSHAP global importance for BEST model (", best_model_name, "):\n", sep = "")
+print(shap_importance_best)
+
+############################################################
+# 14. Combined Train/Test fits for ALL models (one table)
+############################################################
+
+AllModels_Fit <- lapply(names(results_list), function(nm) {
+  res <- results_list[[nm]]
+  
+  train_fit <- res$train_df %>%
+    transmute(
+      Year,
+      Set   = "Train",
+      Model = nm,
+      Actual = Output,
+      Fit    = Fitted
+    )
+  
+  test_fit <- res$test_df %>%
+    transmute(
+      Year,
+      Set   = "Test",
+      Model = nm,
+      Actual = Output,
+      Fit    = Predicted
+    )
+  
+  bind_rows(train_fit, test_fit)
+}) %>%
+  bind_rows() %>%
+  arrange(Year, Model, Set)
+
+
+############################################################
+# 15. Save All Results to One Excel File
+############################################################
+
+out_file <- file.path(
+  data_dir,
+  "USA_MARS_Deg1_6Models_NoYear_NonlinearInputs_StrictForecast_SHAP_CV.xlsx"
+)
+
+sheets <- list(
+  "Summary_Metrics"  = Summary_Metrics,
+  "BestModel_Future" = sel_res$future_df,
+  "SHAP_Best_Model"  = shap_importance_best,
+  "AllModels_Fit"    = AllModels_Fit   # <-- new sheet
+)
+
+# keep individual Train/Test/Forecast sheets per model
+for (nm in names(results_list)) {
+  res <- results_list[[nm]]
+  sheets[[paste0(nm, "_Train")]]    <- res$train_df
+  sheets[[paste0(nm, "_Test")]]     <- res$test_df
+  sheets[[paste0(nm, "_Forecast")]] <- res$future_df
+}
+
+write_xlsx(sheets, out_file)
+
+cat("\nAll 6-model MARS results (NO Year, nonlinear inputs, strict output forecast, CV pruning, SHAP) saved to:\n",
+    out_file, "\n")
