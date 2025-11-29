@@ -1,0 +1,45 @@
+library(readxl)
+library(dplyr)
+library(corrplot)
+
+data_dir  <- "D:/Writing paper/Potential paper/Energy USA"
+file_name_orig <- "USA_Transport-Energy Consum and CO2 (2025-01-02).xls"
+full_path_orig <- file.path(data_dir, file_name_orig)
+
+# Read original file: skip row 1, use row 2 as header
+orig_df <- read_excel(
+  full_path_orig,
+  sheet     = 1,
+  skip      = 2,      # skip first and second header row
+  col_names = TRUE
+)
+
+# Column indices as before:
+# Output F = 6; Inputs I:Z (9:26) except O(15), R(18), S(19)
+y_col_index   <- 6
+input_indices <- setdiff(9:26, c(15, 18, 19))
+
+X_orig <- orig_df[, input_indices]
+
+# Ensure numeric
+X_orig_num <- X_orig %>%
+  mutate(across(everything(), ~ suppressWarnings(as.numeric(.))))
+
+# Correlation matrix for original inputs
+corr_orig <- cor(X_orig_num, use = "pairwise.complete.obs")
+
+# (Optional) shorten names a bit for plotting
+colnames(corr_orig) <- abbreviate(colnames(corr_orig), minlength = 8)
+
+# Heatmap for original inputs
+plot.new()
+corrplot(
+  corr_orig,
+  method  = "color",
+  type    = "upper",
+  tl.col  = "black",
+  tl.srt  = 45,
+  tl.cex  = 0.7,
+  mar     = c(1, 1, 3, 1),
+  title   = "Correlation Heatmap – Original Input Data"
+)
