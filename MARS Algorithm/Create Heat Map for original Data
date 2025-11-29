@@ -2,8 +2,8 @@ library(readxl)
 library(dplyr)
 library(corrplot)
 
-data_dir  <- "D:/Writing paper/Potential paper/Energy USA"
-file_name_orig <- "USA_Transport-Energy Consum and CO2 (2025-01-02).xls"
+data_dir  <- "D:/****Directory*****"
+file_name_orig <- "USA_Transport-Energy Consum and CO2.xls"
 full_path_orig <- file.path(data_dir, file_name_orig)
 
 # Read original file: skip row 1, use row 2 as header
