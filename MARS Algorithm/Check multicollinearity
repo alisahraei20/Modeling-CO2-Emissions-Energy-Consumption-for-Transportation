@@ -1,0 +1,189 @@
+###############################################
+# MARS Input Preparation + Multicollinearity
+# - Output: Column F (energy consumption)
+# - Inputs: Columns I:Z, excluding O, R, S
+# - Rows 1 and 2 are headers (we use row 2)
+# - Creates Excel files + visualizations
+###############################################
+
+# Install packages once (if needed)
+# install.packages(c("readxl", "dplyr", "caret", "writexl", "corrplot"))
+
+library(readxl)
+library(dplyr)
+library(caret)
+library(writexl)
+library(corrplot)
+
+## 1. Paths and file name -----------------------------------------------
+
+data_dir  <- "D:/Writing paper/Potential paper/Energy USA"
+file_name <- "USA_Transport-Energy Consum and CO2 (2025-01-02).xls"
+
+full_path <- file.path(data_dir, file_name)
+
+## 2. Read Excel (use 2nd row as header, data starts from row 3) --------
+# rows 1 and 2 are headers; we skip the first one and use the second as colnames
+
+raw_df <- read_excel(
+  full_path,
+  sheet    = 1,   # change if your data is in another sheet
+  skip     = 1,   # skip first header row; row 2 becomes header
+  col_names = TRUE
+)
+
+# Optional: check column names to be sure
+# print(colnames(raw_df))
+
+## 3. Define output (Y) and input (X) columns ---------------------------
+# Column indices in Excel:
+#  A=1, B=2, C=3, D=4, E=5, F=6, G=7, H=8,
+#  I=9, J=10, K=11, L=12, M=13, N=14, O=15, P=16, Q=17,
+#  R=18, S=19, T=20, U=21, V=22, W=23, X=24, Y=25, Z=26
+
+# Output: column F = index 6
+y_col_index <- 6
+
+# Input candidates: I:Z = 9:26, excluding O(15), R(18), S(19)
+input_indices <- setdiff(9:26, c(15, 18, 19))
+
+# Extract output and input data
+y <- raw_df[[y_col_index]]
+X_full <- raw_df[, input_indices]
+
+cat("Original predictors used as inputs:\n")
+print(colnames(X_full))
+
+## 4. Ensure numeric predictors (for correlation) -----------------------
+
+X_num <- X_full %>%
+  mutate(across(
+    .cols = everything(),
+    .fns  = ~ suppressWarnings(as.numeric(.))
+  ))
+
+# Combine into one data frame for MARS
+model_df <- bind_cols(
+  ENERGY_Transport = y,  # rename output as you like
+  X_num
+)
+
+## 5. Correlation-based multicollinearity filter ------------------------
+# We remove predictors that are highly correlated (|r| > 0.95)
+
+# Compute correlation matrix (inputs only)
+corr_mat <- cor(
+  model_df %>% select(-ENERGY_Transport),
+  use = "pairwise.complete.obs"
+)
+
+# Find indices of highly correlated variables to remove
+# cutoff = 0.95 for multicollinearity removal
+to_drop_names <- findCorrelation(corr_mat, cutoff = 0.95, names = TRUE)
+
+cat("\nPredictors removed due to high correlation (multicollinearity):\n")
+if (length(to_drop_names) == 0) {
+  cat("  None. All predictors kept.\n")
+} else {
+  print(to_drop_names)
+}
+
+# Keep only non-dropped predictors
+X_reduced <- model_df %>%
+  select(-all_of(to_drop_names))
+
+# Final dataset for MARS: output + reduced inputs
+final_df <- X_reduced  # already includes ENERGY_Transport
+
+cat("\nFinal predictors kept for MARS modeling:\n")
+print(colnames(final_df))
+
+## 6. Build tables for reporting ----------------------------------------
+
+# (a) Full correlation matrix as data frame for Excel
+corr_mat_df <- as.data.frame(corr_mat)
+corr_mat_df <- cbind(Variable = rownames(corr_mat), corr_mat_df)
+rownames(corr_mat_df) <- NULL
+
+# (b) Flatten correlation matrix to list high-corr pairs (for visualization & table)
+flattenCorrMatrix <- function(cmat) {
+  ut <- upper.tri(cmat)
+  data.frame(
+    Var1 = rownames(cmat)[row(cmat)[ut]],
+    Var2 = colnames(cmat)[col(cmat)[ut]],
+    Corr = cmat[ut]
+  )
+}
+
+flat_corr <- flattenCorrMatrix(corr_mat)
+
+# Threshold for "high correlation" to show in table / report
+high_corr_threshold <- 0.80
+
+high_corr_pairs <- flat_corr %>%
+  filter(abs(Corr) >= high_corr_threshold) %>%
+  arrange(desc(abs(Corr)))
+
+cat("\nHighly correlated pairs (|r| >= ", high_corr_threshold, "):\n", sep = "")
+if (nrow(high_corr_pairs) == 0) {
+  cat("  None.\n")
+} else {
+  print(high_corr_pairs)
+}
+
+# (c) Dropped predictors table
+dropped_df <- data.frame(Dropped_Predictor = to_drop_names)
+
+## 7. Save results to Excel files ---------------------------------------
+
+# 7.1 Detailed diagnostic file (multiple sheets)
+diagnostic_file <- file.path(data_dir, "USA_MARS_Multicollinearity_Diagnostics.xlsx")
+
+write_xlsx(
+  list(
+    "Original_for_MARS" = model_df,
+    "Reduced_for_MARS"  = final_df,
+    "Corr_Matrix"       = corr_mat_df,
+    "HighCorr_Pairs"    = high_corr_pairs,
+    "Dropped_Predictors"= dropped_df
+  ),
+  path = diagnostic_file
+)
+
+# 7.2 Clean file only for next modeling (just final_df)
+model_file <- file.path(data_dir, "USA_MARS_Final_For_MARS_Modeling.xlsx")
+write_xlsx(final_df, path = model_file)
+
+cat("\nDONE.\n")
+cat("Detailed diagnostics file saved at:\n", diagnostic_file, "\n")
+cat("Clean final input/output file for modeling saved at:\n", model_file, "\n")
+
+## 8. Visualizations ----------------------------------------------------
+# These will appear in the RStudio Plots pane (or default graphics device)
+
+# 8.1 Full correlation heatmap for all predictors
+corrplot(
+  corr_mat,
+  method = "color",
+  type   = "upper",
+  tl.col = "black",
+  tl.srt = 45,
+  title  = "Correlation Matrix - All Predictors",
+  mar    = c(0,0,2,0)
+)
+
+# 8.2 (Optional) Correlation heatmap for reduced predictors only
+corr_mat_reduced <- cor(
+  final_df %>% select(-ENERGY_Transport),
+  use = "pairwise.complete.obs"
+)
+
+corrplot(
+  corr_mat_reduced,
+  method = "color",
+  type   = "upper",
+  tl.col = "black",
+  tl.srt = 45,
+  title  = "Correlation Matrix - Reduced Predictors",
+  mar    = c(0,0,2,0)
+)
