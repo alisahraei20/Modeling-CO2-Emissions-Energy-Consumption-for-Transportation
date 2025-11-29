@@ -17,8 +17,8 @@ library(corrplot)
 
 ## 1. Paths and file name -----------------------------------------------
 
-data_dir  <- "D:/Writing paper/Potential paper/Energy USA"
-file_name <- "USA_Transport-Energy Consum and CO2 (2025-01-02).xls"
+data_dir  <- "D:/*****Directory****"
+file_name <- "USA_Transport-Energy Consum and CO2.xls"
 
 full_path <- file.path(data_dir, file_name)
 
