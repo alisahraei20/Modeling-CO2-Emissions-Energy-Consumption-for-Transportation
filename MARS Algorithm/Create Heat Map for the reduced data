@@ -1,0 +1,57 @@
+file_name_red  <- "USA_MARS_Final_For_MARS_Modeling.xlsx"
+full_path_red  <- file.path(data_dir, file_name_red)
+
+# Read reduced file: row 1 skipped, row 2 used as header
+red_df <- read_excel(
+  full_path_red,
+  sheet     = 1,
+  skip      = 1,      # skip original long header (row 1)
+  col_names = TRUE    # use row 2 (short names) as column names
+)
+
+# Check structure
+print(colnames(red_df))
+# Expected: 1 output + 9 inputs with short names
+
+# Make everything numeric (if any column is character)
+red_num <- red_df %>%
+  mutate(across(everything(), ~ suppressWarnings(as.numeric(.))))
+
+# Option A: correlation including output + inputs (all 10 variables)
+corr_red_all <- cor(red_num, use = "pairwise.complete.obs")
+
+# Option B (for pure multicollinearity): inputs only (assume output is first column)
+corr_red_inputs <- cor(
+  red_num[, -1],   # drop output column
+  use = "pairwise.complete.obs"
+)
+
+# Shorten labels a bit if needed
+colnames(corr_red_all)    <- abbreviate(colnames(corr_red_all), minlength = 6)
+colnames(corr_red_inputs) <- abbreviate(colnames(corr_red_inputs), minlength = 6)
+
+# 🔹 Heatmap 1: all variables (output + 9 inputs)
+plot.new()
+corrplot(
+  corr_red_all,
+  method  = "color",
+  type    = "upper",
+  tl.col  = "black",
+  tl.srt  = 45,
+  tl.cex  = 0.8,
+  mar     = c(1, 1, 3, 1),
+  title   = "Correlation Heatmap – Reduced Data (Output + Inputs)"
+)
+
+# 🔹 Heatmap 2: inputs only (for multicollinearity check)
+plot.new()
+corrplot(
+  corr_red_inputs,
+  method  = "color",
+  type    = "upper",
+  tl.col  = "black",
+  tl.srt  = 45,
+  tl.cex  = 0.8,
+  mar     = c(1, 1, 3, 1),
+  title   = "Correlation Heatmap – Reduced Inputs Only"
+)
